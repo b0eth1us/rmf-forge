@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Docker
+.docker/
+
+# DoD reference data — download separately, do not commit
+backend/data/stig/ASD_STIG.xml
+backend/data/cci/U_CCI_List.xml
+
+# Secrets
+*.pem
+*.key
+.env.prod
+
+# OS
+.DS_Store
+Thumbs.db

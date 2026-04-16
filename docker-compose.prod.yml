@@ -1,0 +1,14 @@
+version: "3.9"
+# Production: pull prebuilt images from Docker Hub
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+services:
+  frontend:
+    image: ${DOCKERHUB_USERNAME}/rmf-forge-frontend:${TAG:-latest}
+    build: !reset null
+
+  backend:
+    image: ${DOCKERHUB_USERNAME}/rmf-forge-backend:${TAG:-latest}
+    build: !reset null
+    environment:
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://rmfforge:rmfforge@postgres:5432/rmfforge}
