@@ -28,8 +28,11 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parents[3]  # backend/
-DATA_DIR = BASE_DIR / "data"
+# Inside the container the app lives at /app, so data is at /app/data
+# Outside the container (local dev) it's relative to this file's location
+_CONTAINER_DATA = Path("/app/data")
+_LOCAL_DATA = Path(__file__).resolve().parents[3] / "data"
+DATA_DIR = _CONTAINER_DATA if _CONTAINER_DATA.exists() else _LOCAL_DATA
 CCI_DIR = DATA_DIR / "cci"
 CWE_DIR = DATA_DIR / "cwe"
 DEFAULT_OUTPUT = CWE_DIR / "cwe_cci_map.json"
@@ -88,6 +91,8 @@ def _download_cwe_nist_csv(url: str) -> list[dict]:
         print(f"[ERROR] Download failed: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Strip UTF-8 BOM if present — MITRE's CSV starts with \ufeff
+    raw = raw.lstrip("\ufeff")
     reader = csv.DictReader(raw.splitlines())
     rows = list(reader)
     print(f"       Downloaded {len(rows)} rows.")
@@ -102,12 +107,13 @@ def _build_cwe_to_nist(rows: list[dict]) -> dict[str, set[str]]:
     cwe_to_nist: dict[str, set[str]] = defaultdict(set)
 
     for row in rows:
-        # Column names vary slightly across CSV versions — try common names
+        # Actual columns: 'CWE-ID', 'CWE Name', 'NIST-ID', 'Rev', 'NIST Name'
+        # (BOM stripped above so no \ufeff prefix)
         raw_cwe = (
                 row.get("CWE-ID") or row.get("CWE_ID") or row.get("cwe_id") or ""
         ).strip()
         raw_nist = (
-                row.get("NIST-800-53") or row.get("NIST_800_53") or row.get("nist") or ""
+                row.get("NIST-ID") or row.get("NIST-800-53") or row.get("NIST_800_53") or ""
         ).strip()
 
         if not raw_cwe or not raw_nist:

@@ -9,3 +9,4 @@ lxml==5.2.2
 python-Levenshtein==0.25.1
 pydantic==2.7.1
 pydantic-settings==2.2.1
+reportlab==4.2.0

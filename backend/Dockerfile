@@ -10,7 +10,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Bundled reference data (rarely changes — own layer for cache efficiency)
 COPY data/ ./data/
+COPY alembic/ ./alembic/
+COPY alembic.ini .
 COPY app/ ./app/
 
+# Startup script: run migrations then start server
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["./entrypoint.sh"]

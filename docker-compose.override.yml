@@ -8,8 +8,8 @@ services:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:8000
-    command: npm run dev -- --host
+      - VITE_API_URL=http://backend:8000
+    command: npm run dev -- --host --port 80
 
   backend:
     volumes:

@@ -12,6 +12,8 @@ class Project(Base):
     name = Column(String(255), nullable=False)
     system_name = Column(String(255))
     description = Column(Text)
+    host_name = Column(String(255))         # for .ckl HOST_NAME
+    host_ip = Column(String(50))            # for .ckl HOST_IP
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

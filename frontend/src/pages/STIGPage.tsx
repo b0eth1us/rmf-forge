@@ -13,6 +13,15 @@ export default function STIGPage() {
     queryFn: () => api.get(`/findings/project/${id}`).then(r => r.data),
   });
 
+  const remapMut = useMutation({
+    mutationFn: () => api.post(`/findings/project/${id}/remap`).then(r => r.data),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["findings", id] });
+      qc.invalidateQueries({ queryKey: ["unmapped", id] });
+      alert(`Remapped ${data.remapped} of ${data.total} findings`);
+    },
+  });
+
   const { data: unmapped = [] } = useQuery({
     queryKey: ["unmapped", id],
     queryFn: () => api.get(`/stig/unmapped/${id}`).then(r => r.data),
@@ -81,6 +90,9 @@ export default function STIGPage() {
         <a href={`/api/stig/export/ckl/${id}`} style={{ ...dlBtn, background: "#1d4ed8" }}>
           ⬇ Download STIG Viewer .ckl
         </a>
+        <button onClick={() => remapMut.mutate()} style={{ ...dlBtn, background: "#6d28d9", cursor: "pointer", border: "none" }}>
+          {remapMut.isPending ? "Remapping…" : "🔄 Auto-map CCIs & Vuln IDs"}
+        </button>
         <a href={`/api/stig/export/xccdf/${id}`} style={{ ...dlBtn, background: "#059669" }}>
           ⬇ Download XCCDF XML
         </a>

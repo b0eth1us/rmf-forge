@@ -8,7 +8,7 @@ export default function ProjectsPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: "", system_name: "", description: "" });
+  const [form, setForm] = useState({ name: "", system_name: "", description: "", host_name: "", host_ip: "" });
 
   const { data: projects = [], isLoading } = useQuery<Project[]>({
     queryKey: ["projects"],
@@ -17,7 +17,11 @@ export default function ProjectsPage() {
 
   const createMut = useMutation({
     mutationFn: projectsApi.create,
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["projects"] }); setShowForm(false); setForm({ name: "", system_name: "", description: "" }); },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      setShowForm(false);
+      setForm({ name: "", system_name: "", description: "", host_name: "", host_ip: "" });
+    },
   });
 
   const deleteMut = useMutation({
@@ -45,7 +49,13 @@ export default function ProjectsPage() {
               onChange={e => setForm(f => ({ ...f, system_name: e.target.value }))} style={inputStyle} />
             <textarea placeholder="Description" value={form.description}
               onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
-              style={{ ...inputStyle, minHeight: 80, resize: "vertical" }} />
+              style={{ ...inputStyle, minHeight: 60, resize: "vertical" }} />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <input placeholder="Host name (for .ckl)" value={form.host_name}
+                onChange={e => setForm(f => ({ ...f, host_name: e.target.value }))} style={inputStyle} />
+              <input placeholder="Host IP (for .ckl)" value={form.host_ip}
+                onChange={e => setForm(f => ({ ...f, host_ip: e.target.value }))} style={inputStyle} />
+            </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => createMut.mutate(form)} disabled={!form.name} style={btnStyle}>
                 {createMut.isPending ? "Creating…" : "Create Project"}
@@ -70,11 +80,15 @@ export default function ProjectsPage() {
               <div>
                 <div style={{ fontWeight: 600, fontSize: 15 }}>{p.name}</div>
                 {p.system_name && <div style={{ fontSize: 13, color: "#6b7280", marginTop: 2 }}>{p.system_name}</div>}
-                {p.description && <div style={{ fontSize: 13, color: "#9ca3af", marginTop: 4 }}>{p.description}</div>}
+                {(p.host_name || p.host_ip) && (
+                  <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 2 }}>
+                    {p.host_name}{p.host_ip ? ` · ${p.host_ip}` : ""}
+                  </div>
+                )}
               </div>
               <div style={{ display: "flex", gap: 8 }} onClick={e => e.stopPropagation()}>
                 <button onClick={() => navigate(`/projects/${p.id}`)} style={ghostBtnStyle}>Open →</button>
-                <button onClick={() => { if (confirm("Delete this project?")) deleteMut.mutate(p.id); }}
+                <button onClick={() => { if (confirm("Delete this project and all its findings?")) deleteMut.mutate(p.id); }}
                   style={{ ...ghostBtnStyle, color: "#ef4444", borderColor: "#fca5a5" }}>Delete</button>
               </div>
             </div>
@@ -85,19 +99,7 @@ export default function ProjectsPage() {
   );
 }
 
-const cardStyle: React.CSSProperties = {
-  background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10,
-  padding: "1.25rem", marginBottom: 8,
-};
-const btnStyle: React.CSSProperties = {
-  background: "#1d4ed8", color: "#fff", border: "none", borderRadius: 6,
-  padding: "8px 16px", cursor: "pointer", fontSize: 14, fontWeight: 500,
-};
-const ghostBtnStyle: React.CSSProperties = {
-  background: "transparent", color: "#374151", border: "1px solid #d1d5db",
-  borderRadius: 6, padding: "7px 14px", cursor: "pointer", fontSize: 13,
-};
-const inputStyle: React.CSSProperties = {
-  border: "1px solid #d1d5db", borderRadius: 6, padding: "8px 12px",
-  fontSize: 14, width: "100%", fontFamily: "inherit",
-};
+const cardStyle: React.CSSProperties = { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "1.25rem", marginBottom: 8 };
+const btnStyle: React.CSSProperties = { background: "#1d4ed8", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", cursor: "pointer", fontSize: 14, fontWeight: 500 };
+const ghostBtnStyle: React.CSSProperties = { background: "transparent", color: "#374151", border: "1px solid #d1d5db", borderRadius: 6, padding: "7px 14px", cursor: "pointer", fontSize: 13 };
+const inputStyle: React.CSSProperties = { border: "1px solid #d1d5db", borderRadius: 6, padding: "8px 12px", fontSize: 14, width: "100%", fontFamily: "inherit" };

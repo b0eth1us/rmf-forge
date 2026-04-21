@@ -16,7 +16,7 @@ export default function ZAPPage() {
     const fd = new FormData();
     fd.append("file", file);
     try {
-      const { data } = await api.post(`/zap/map/${id}`, fd);
+      const { data } = await api.post(`/zap/map/${id}`, fd, { headers: { "Content-Type": "multipart/form-data" } });
       setResult(data);
     } catch (e: any) {
       setError(e.response?.data?.detail || "Mapping failed");

@@ -5,33 +5,54 @@ import { api } from "../utils/api";
 type Suggestion = { original: string; confidence: number };
 type SuggestionMap = Record<string, Suggestion[]>;
 
+interface FileResult {
+  filename: string;
+  findings_added: number;
+  findings_updated: number;
+  findings_unchanged: number;
+}
+
 export default function ConsolidatePage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
   const [phase, setPhase] = useState<"upload" | "mapping" | "importing" | "done">("upload");
   const [dragging, setDragging] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [currentFileIndex, setCurrentFileIndex] = useState(0);
   const [preview, setPreview] = useState<any>(null);
   const [approvedMap, setApprovedMap] = useState<Record<string, string>>({});
-  const [result, setResult] = useState<any>(null);
+  const [results, setResults] = useState<FileResult[]>([]);
   const [error, setError] = useState("");
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault(); setDragging(false);
-    const f = e.dataTransfer.files[0];
-    if (f) setFile(f);
+    const dropped = Array.from(e.dataTransfer.files);
+    if (dropped.length) setFiles(dropped);
   }, []);
 
-  const handlePreview = async () => {
+  const NATIVE_TOOLS = ["fortify", "zap_xml", "zap_json", "dep_check_xml", "dep_check_json"];
+
+  const handlePreview = async (fileIndex = 0) => {
+    const file = files[fileIndex];
     if (!file) return;
     setError("");
+    setCurrentFileIndex(fileIndex);
     const fd = new FormData();
     fd.append("file", file);
     try {
-      const { data } = await api.post("/consolidate/preview", fd);
+      const { data } = await api.post("/consolidate/preview", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
       setPreview(data);
-      // Build initial approved map from suggestions (highest confidence per canonical)
+
+      // Native formats (fpr, xml, json) have no columns to map — import immediately
+      if (NATIVE_TOOLS.includes(data.tool)) {
+        setApprovedMap({});
+        await handleImportWithFile(file, fileIndex, {});
+        return;
+      }
+
       const init: Record<string, string> = {};
       for (const [canonical, suggestions] of Object.entries(data.suggestions as SuggestionMap)) {
         if (canonical === "__unmatched__") continue;
@@ -41,30 +62,59 @@ export default function ConsolidatePage() {
       setApprovedMap(init);
       setPhase("mapping");
     } catch (e: any) {
-      setError(e.response?.data?.detail || "Failed to parse file");
+      setError(e.response?.data?.detail || `Failed to parse ${file.name}`);
     }
   };
 
-  const handleImport = async () => {
-    if (!file || !id) return;
+  const handleImportWithFile = async (
+    file: File,
+    fileIndex: number,
+    colMap: Record<string, string>,
+  ) => {
+    if (!id) return;
     setPhase("importing");
     const fd = new FormData();
     fd.append("file", file);
-    fd.append("column_map", JSON.stringify(approvedMap));
+    fd.append("column_map", JSON.stringify(colMap));
     try {
-      const { data } = await api.post(`/consolidate/import/${id}`, fd);
-      setResult(data);
-      setPhase("done");
+      const { data } = await api.post(`/consolidate/import/${id}`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const newResult: FileResult = {
+        filename: file.name,
+        findings_added: data.findings_added,
+        findings_updated: data.findings_updated,
+        findings_unchanged: data.findings_unchanged,
+      };
+      setResults(prev => {
+        const updated = [...prev, newResult];
+        return updated;
+      });
+
+      const nextIndex = fileIndex + 1;
+      if (nextIndex < files.length) {
+        setPreview(null);
+        await handlePreview(nextIndex);
+      } else {
+        setPhase("done");
+      }
     } catch (e: any) {
       setError(e.response?.data?.detail || "Import failed");
       setPhase("mapping");
     }
   };
 
+  const handleImport = () =>
+    handleImportWithFile(files[currentFileIndex], currentFileIndex, approvedMap);
+
+  const totalAdded = results.reduce((s, r) => s + r.findings_added, 0);
+  const totalUpdated = results.reduce((s, r) => s + r.findings_updated, 0);
+  const totalUnchanged = results.reduce((s, r) => s + r.findings_unchanged, 0);
+
   return (
     <div style={{ padding: "2rem", maxWidth: 800 }}>
       <button onClick={() => navigate(`/projects/${id}`)} style={backBtn}>← Project</button>
-      <h1 style={{ margin: "0.5rem 0 1.5rem", fontSize: 22, fontWeight: 600 }}>Consolidate Scan</h1>
+      <h1 style={{ margin: "0.5rem 0 1.5rem", fontSize: 22, fontWeight: 600 }}>Consolidate Scans</h1>
 
       {error && <div style={errorBox}>{error}</div>}
 
@@ -82,21 +132,38 @@ export default function ConsolidatePage() {
           >
             <div style={{ fontSize: 36, marginBottom: 12 }}>📂</div>
             <p style={{ margin: "0 0 12px", fontWeight: 500 }}>
-              {file ? file.name : "Drop a scan file here"}
+              {files.length > 0
+                ? `${files.length} file${files.length > 1 ? "s" : ""} selected: ${files.map(f => f.name).join(", ")}`
+                : "Drop scan files here"}
             </p>
             <p style={{ margin: "0 0 16px", fontSize: 13, color: "#6b7280" }}>
-              Supported: .fpr (Fortify), .xml / .json (ZAP), .csv, .xlsx
+              Supported: .fpr (Fortify), .xml / .json (ZAP), .csv, .xlsx — select multiple files at once
             </p>
             <label style={btnStyle}>
-              Browse file
-              <input type="file" accept=".fpr,.csv,.xlsx,.xml,.json"
-                style={{ display: "none" }} onChange={e => setFile(e.target.files?.[0] || null)} />
+              Browse files
+              <input
+                type="file"
+                accept=".fpr,.csv,.xlsx,.xml,.json"
+                multiple
+                style={{ display: "none" }}
+                onChange={e => setFiles(Array.from(e.target.files || []))}
+              />
             </label>
           </div>
-          {file && (
-            <div style={{ marginTop: "1rem", display: "flex", gap: 10 }}>
-              <button onClick={handlePreview} style={btnStyle}>Analyze Columns →</button>
-              <button onClick={() => setFile(null)} style={ghostBtn}>Clear</button>
+          {files.length > 0 && (
+            <div style={{ marginTop: "1rem" }}>
+              <div style={{ marginBottom: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                {files.map((f, i) => (
+                  <div key={i} style={{ fontSize: 13, color: "#374151", background: "#f3f4f6", borderRadius: 6, padding: "6px 12px", display: "flex", justifyContent: "space-between" }}>
+                    <span>📄 {f.name}</span>
+                    <span style={{ color: "#9ca3af" }}>{(f.size / 1024).toFixed(1)} KB</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button onClick={() => handlePreview(0)} style={btnStyle}>Analyze Columns →</button>
+                <button onClick={() => setFiles([])} style={ghostBtn}>Clear</button>
+              </div>
             </div>
           )}
         </div>
@@ -106,6 +173,11 @@ export default function ConsolidatePage() {
         <div>
           <div style={infoBox}>
             <strong>{preview.filename}</strong> — {preview.row_count} rows detected as <code>{preview.tool}</code>
+            {files.length > 1 && (
+              <span style={{ marginLeft: 12, fontSize: 12, color: "#6b7280" }}>
+                File {currentFileIndex + 1} of {files.length}
+              </span>
+            )}
           </div>
           <h2 style={{ fontSize: 16, fontWeight: 600, margin: "1.5rem 0 0.75rem" }}>Review column mapping</h2>
           <p style={{ fontSize: 13, color: "#6b7280", margin: "0 0 1rem" }}>
@@ -137,9 +209,7 @@ export default function ConsolidatePage() {
                       </select>
                     </td>
                     <td style={{ padding: "8px 12px" }}>
-                      {suggestions[0] ? (
-                        <ConfidenceBadge value={suggestions[0].confidence} />
-                      ) : "—"}
+                      {suggestions[0] ? <ConfidenceBadge value={suggestions[0].confidence} /> : "—"}
                     </td>
                   </tr>
                 ))}
@@ -156,8 +226,10 @@ export default function ConsolidatePage() {
           )}
 
           <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={handleImport} style={btnStyle}>Import Findings →</button>
-            <button onClick={() => { setPhase("upload"); setPreview(null); }} style={ghostBtn}>Back</button>
+            <button onClick={handleImport} style={btnStyle}>
+              {currentFileIndex + 1 < files.length ? `Import & Next File →` : "Import Findings →"}
+            </button>
+            <button onClick={() => { setPhase("upload"); setPreview(null); setResults([]); }} style={ghostBtn}>Back</button>
           </div>
         </div>
       )}
@@ -165,19 +237,28 @@ export default function ConsolidatePage() {
       {phase === "importing" && (
         <div style={{ textAlign: "center", padding: "3rem", color: "#6b7280" }}>
           <div style={{ fontSize: 36, marginBottom: 12 }}>⏳</div>
-          Importing and deduplicating findings…
+          Importing {files[currentFileIndex]?.name}… ({currentFileIndex + 1} of {files.length})
         </div>
       )}
 
-      {phase === "done" && result && (
+      {phase === "done" && (
         <div style={{ ...infoBox, background: "#f0fdf4", borderColor: "#86efac" }}>
-          <div style={{ fontSize: 18, marginBottom: 12 }}>✅ Import complete</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-            <ResultStat label="New findings" value={result.findings_added} color="#dcfce7" />
-            <ResultStat label="Updated" value={result.findings_updated} color="#fef9c3" />
-            <ResultStat label="Unchanged" value={result.findings_unchanged} color="#f3f4f6" />
+          <div style={{ fontSize: 18, marginBottom: 12 }}>✅ Import complete — {results.length} file{results.length > 1 ? "s" : ""} processed</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: "1rem" }}>
+            <ResultStat label="New findings" value={totalAdded} color="#dcfce7" />
+            <ResultStat label="Updated" value={totalUpdated} color="#fef9c3" />
+            <ResultStat label="Unchanged" value={totalUnchanged} color="#f3f4f6" />
           </div>
-          <button onClick={() => navigate(`/projects/${id}`)} style={{ ...btnStyle, marginTop: "1rem" }}>
+          {results.length > 1 && (
+            <div style={{ marginBottom: "1rem" }}>
+              {results.map((r, i) => (
+                <div key={i} style={{ fontSize: 13, color: "#374151", padding: "4px 0", borderBottom: "1px solid #d1fae5" }}>
+                  <strong>{r.filename}</strong> — {r.findings_added} new, {r.findings_updated} updated, {r.findings_unchanged} unchanged
+                </div>
+              ))}
+            </div>
+          )}
+          <button onClick={() => navigate(`/projects/${id}`)} style={{ ...btnStyle, marginTop: "0.5rem" }}>
             View Findings →
           </button>
         </div>

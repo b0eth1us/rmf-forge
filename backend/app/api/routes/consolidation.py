@@ -6,9 +6,13 @@ from app.models.finding import Finding, FindingStatus
 from app.models.import_log import ImportLog
 from app.services.column_mapper import suggest_mapping
 from app.services.finding_hasher import stable_key
+from app.services.stig_mapper import map_finding_to_stig
+from app.services.cci_mapper import map_cwe_to_ccis
 from app.parsers.fortify_parser import parse_fpr
 from app.parsers.zap_parser import parse_zap_xml, parse_zap_json
+from app.parsers.dep_check_parser import parse_dep_check_xml, parse_dep_check_json
 import hashlib, json, io, uuid
+from datetime import datetime
 from openpyxl import load_workbook
 import csv as csvlib
 
@@ -36,10 +40,20 @@ def _detect_tool(filename: str, data: bytes) -> str:
     if fn.endswith(".fpr"):
         return "fortify"
     if fn.endswith(".json"):
+        # Peek content to distinguish ZAP vs dep-check JSON
+        try:
+            obj = json.loads(data[:4096])
+            if "dependencies" in obj:
+                return "dep_check_json"
+            if "site" in obj or "alerts" in obj:
+                return "zap_json"
+        except Exception:
+            pass
         return "zap_json"
     if fn.endswith(".xml"):
-        # peek for ZAP signature
-        if b"<OWASPZAPReport" in data[:512] or b"<report>" in data[:512]:
+        if b"dependency-check" in data[:1024] or b"DependencyCheckReport" in data[:1024]:
+            return "dep_check_xml"
+        if b"OWASPZAPReport" in data[:512] or b"alertitem" in data[:512]:
             return "zap_xml"
         return "xml_generic"
     if fn.endswith(".csv"):
@@ -48,42 +62,69 @@ def _detect_tool(filename: str, data: bytes) -> str:
         return "xlsx"
     return "unknown"
 
+def _parse_file(tool: str, data: bytes) -> list[dict]:
+    if tool == "fortify":       return parse_fpr(data)
+    if tool == "zap_xml":       return parse_zap_xml(data)
+    if tool == "zap_json":      return parse_zap_json(data)
+    if tool == "dep_check_xml": return parse_dep_check_xml(data)
+    if tool == "dep_check_json":return parse_dep_check_json(data)
+    if tool == "csv":           return _parse_csv(data)
+    if tool == "xlsx":          return _parse_xlsx(data)
+    raise HTTPException(status_code=400, detail=f"Unsupported file type: {tool}")
+
 def _normalize_finding(raw: dict, tool: str, column_map: dict[str, str]) -> dict:
-    """Apply approved column mapping to a raw row dict."""
-    out: dict = {"source_tool": tool}
-    reverse = {v: k for k, v in column_map.items()}
-    for orig_col, value in raw.items():
-        canonical = reverse.get(orig_col, orig_col)
-        out[canonical] = str(value) if value is not None else ""
-    return out
+    # Parsers already return normalized dicts — column_map only applies to csv/xlsx
+    if tool in ("csv", "xlsx"):
+        out: dict = {"source_tool": tool}
+        reverse = {v: k for k, v in column_map.items()}
+        for col, value in raw.items():
+            canonical = reverse.get(col, col)
+            out[canonical] = str(value) if value is not None else ""
+        return out
+    return {**raw, "source_tool": tool}
+
+def _auto_map(norm: dict) -> dict:
+    """Derive vuln_id, cci_id, nist_control from finding content."""
+    vuln_id = norm.get("vuln_id") or None
+    cci_id = norm.get("cci_id") or None
+    nist_control = norm.get("nist_control") or None
+
+    cwe = re.sub(r'[^0-9]', '', str(norm.get("cwe_id") or ""))
+    if cwe:
+        ccis = map_cwe_to_ccis(cwe)
+        if ccis:
+            if not cci_id:
+                cci_id = ccis[0].get("cci_id")
+            if not nist_control:
+                nist_control = ccis[0].get("nist_control")
+
+    if not vuln_id or not cci_id:
+        match = map_finding_to_stig(norm.get("title", ""), norm.get("description", ""))
+        if not vuln_id and match.get("vuln_ids"):
+            vuln_id = match["vuln_ids"][0]
+        if not cci_id and match.get("cci_ids"):
+            cci_id = match["cci_ids"][0]
+
+    return {"vuln_id": vuln_id, "cci_id": cci_id, "nist_control": nist_control}
+
+import re
 
 @router.post("/preview")
-async def preview_columns(
-    file: UploadFile = File(...),
-):
-    """Step 1: upload a file, get back column mapping suggestions."""
+async def preview_columns(file: UploadFile = File(...)):
     data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
     tool = _detect_tool(file.filename or "", data)
-
-    if tool == "fortify":
-        rows = parse_fpr(data)
-        columns = list(rows[0].keys()) if rows else []
-    elif tool == "zap_xml":
-        rows = parse_zap_xml(data)
-        columns = list(rows[0].keys()) if rows else []
-    elif tool == "zap_json":
-        rows = parse_zap_json(data)
-        columns = list(rows[0].keys()) if rows else []
-    elif tool == "csv":
-        rows = _parse_csv(data)
-        columns = list(rows[0].keys()) if rows else []
-    elif tool == "xlsx":
-        rows = _parse_xlsx(data)
-        columns = list(rows[0].keys()) if rows else []
-    else:
-        raise HTTPException(400, f"Unsupported file type: {file.filename}")
-
-    suggestions = suggest_mapping(columns)
+    try:
+        rows = _parse_file(tool, data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not parse file: {str(e)}")
+    if not rows:
+        raise HTTPException(status_code=422, detail="No data found in file")
+    columns = list(rows[0].keys())
+    suggestions = suggest_mapping(columns) if tool in ("csv", "xlsx") else {}
     return {
         "filename": file.filename,
         "tool": tool,
@@ -98,38 +139,38 @@ async def preview_columns(
 async def import_file(
     project_id: uuid.UUID,
     file: UploadFile = File(...),
-    column_map: str = Form(...),   # JSON string: {canonical: original_col}
+    column_map: str = Form(default="{}"),
     db: Session = Depends(get_db),
 ):
-    """Step 2: submit approved column mapping, import findings into project."""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
-        raise HTTPException(404, "Project not found")
+        raise HTTPException(status_code=404, detail="Project not found")
 
     data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
     file_hash = _hash(data)
     tool = _detect_tool(file.filename or "", data)
-    col_map: dict[str, str] = json.loads(column_map)
 
-    # Parse raw rows
-    if tool == "fortify":
-        raw_rows = parse_fpr(data)
-    elif tool == "zap_xml":
-        raw_rows = parse_zap_xml(data)
-    elif tool == "zap_json":
-        raw_rows = parse_zap_json(data)
-    elif tool == "csv":
-        raw_rows = _parse_csv(data)
-    elif tool == "xlsx":
-        raw_rows = _parse_xlsx(data)
-    else:
-        raise HTTPException(400, f"Unsupported file type")
+    try:
+        col_map: dict[str, str] = json.loads(column_map)
+    except json.JSONDecodeError:
+        col_map = {}
+
+    try:
+        raw_rows = _parse_file(tool, data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not parse file: {str(e)}")
 
     added = updated = unchanged = 0
 
     for row in raw_rows:
         norm = _normalize_finding(row, tool, col_map)
         key = stable_key(tool, norm.get("plugin_id"), norm.get("title"))
+        mappings = _auto_map(norm)
 
         existing = db.query(Finding).filter(
             Finding.project_id == project_id,
@@ -137,14 +178,28 @@ async def import_file(
         ).first()
 
         if existing:
-            # Preserve justification and status — only update scan data
-            existing.severity = norm.get("severity", existing.severity)
-            existing.description = norm.get("description", existing.description)
-            existing.last_seen = __import__("datetime").datetime.utcnow()
-            if existing.justification:
-                unchanged += 1
-            else:
-                updated += 1
+            existing.severity = norm.get("severity") or existing.severity
+            existing.description = norm.get("description") or existing.description
+            existing.last_seen = datetime.utcnow()
+            # Update Fortify-specific fields always (re-import = fresh scan)
+            if norm.get("file_path"):    existing.file_path = norm["file_path"]
+            if norm.get("line_number"):  existing.line_number = norm["line_number"]
+            if norm.get("code_snippet"): existing.code_snippet = norm["code_snippet"]
+            if norm.get("taint_trace"):  existing.taint_trace = norm["taint_trace"]
+            # Preserve existing audit comment if developer updated it externally
+            if norm.get("audit_comment") and not existing.audit_comment:
+                existing.audit_comment = norm["audit_comment"]
+            if norm.get("audit_action"):
+                existing.audit_action = norm["audit_action"]
+            # Only auto-map if not manually set
+            if not existing.vuln_id and mappings["vuln_id"]:
+                existing.vuln_id = mappings["vuln_id"]
+            if not existing.cci_id and mappings["cci_id"]:
+                existing.cci_id = mappings["cci_id"]
+            if not existing.nist_control and mappings["nist_control"]:
+                existing.nist_control = mappings["nist_control"]
+            unchanged += 1 if existing.justification else 0
+            updated += 1 if not existing.justification else 0
         else:
             finding = Finding(
                 project_id=project_id,
@@ -156,6 +211,20 @@ async def import_file(
                 plugin_id=norm.get("plugin_id"),
                 cwe_id=norm.get("cwe_id"),
                 cve_id=norm.get("cve_id"),
+                vuln_id=mappings["vuln_id"],
+                cci_id=mappings["cci_id"],
+                nist_control=mappings["nist_control"],
+                # Fortify fields
+                audit_comment=norm.get("audit_comment"),
+                audit_action=norm.get("audit_action"),
+                file_path=norm.get("file_path"),
+                line_number=norm.get("line_number"),
+                code_snippet=norm.get("code_snippet"),
+                taint_trace=norm.get("taint_trace"),
+                # ZAP / dep-check fields
+                affected_url=norm.get("affected_url"),
+                dependency_name=norm.get("dependency_name"),
+                dependency_version=norm.get("dependency_version"),
                 status=FindingStatus.not_reviewed,
                 raw_data=json.dumps(row),
             )
@@ -174,9 +243,4 @@ async def import_file(
     db.add(log)
     db.commit()
 
-    return {
-        "status": "ok",
-        "findings_added": added,
-        "findings_updated": updated,
-        "findings_unchanged": unchanged,
-    }
+    return {"status": "ok", "findings_added": added, "findings_updated": updated, "findings_unchanged": unchanged}
